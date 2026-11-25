@@ -17,8 +17,142 @@ import {
 } from './services/medicalDocumentExtractor';
 import { getNearbyLabsService } from './services/labsService';
 import { structureSpokenTranscript, transcribeAndStructureAudio, detectUrgency, URGENT_KEYWORDS } from './services/intakeService';
+import firebaseConfig from '../../firebase-applet-config.json';
+import {
+  getPatientRecoveryQuestion,
+  savePatientRecoverySetup,
+  sendPatientRecoveryOtp,
+  verifyPatientRecoveryOtp,
+} from './services/patientRecoveryService';
 
 export const apiRouter = express.Router();
+
+const firebaseApiKey = (firebaseConfig as { apiKey?: string }).apiKey;
+const recoveryIpAttempts = new Map<string, { count: number; resetAt: number }>();
+
+// A per-process IP limit complements the per-email answer and resend limits below.
+apiRouter.use('/patient/recovery', (req, res, next) => {
+  const now = Date.now();
+  const ip = req.ip || req.socket.remoteAddress || 'unknown';
+  let bucket = recoveryIpAttempts.get(ip);
+  if (!bucket || bucket.resetAt <= now) {
+    bucket = { count: 0, resetAt: now + 15 * 60 * 1000 };
+    recoveryIpAttempts.set(ip, bucket);
+  }
+  bucket.count += 1;
+  if (bucket.count > 20) {
+    return res.status(429).json({ success: false, error: 'Too many recovery requests. Wait 15 minutes and try again.' });
+  }
+  if (recoveryIpAttempts.size > 1000) {
+    for (const [key, value] of recoveryIpAttempts) {
+      if (value.resetAt <= now) recoveryIpAttempts.delete(key);
+    }
+  }
+  next();
+});
+
+async function lookupFirebaseAccount(idToken: string): Promise<{ email: string }> {
+  if (!firebaseApiKey) throw new Error('Firebase Authentication is not configured on the server.');
+  let response: globalThis.Response;
+  try {
+    response = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${firebaseApiKey}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ idToken }),
+    });
+  } catch (error: any) {
+    console.error('Could not reach Firebase Identity Toolkit:', error?.cause || error?.message || error);
+    throw new Error('The server could not reach Firebase Authentication to finish signup. Check server internet access and retry.');
+  }
+  const data = await response.json() as { users?: Array<{ localId?: string; email?: string }>; error?: { message?: string } };
+  const user = data.users?.[0];
+  if (!response.ok || !user?.email || !user.localId) {
+    throw new Error('Patient account verification failed. Sign in again and retry.');
+  }
+  return { email: user.email.trim().toLowerCase() };
+}
+
+// Save a recovery question only after confirming the caller's Firebase ID token.
+apiRouter.post('/patient/recovery/setup', async (req: Request, res: Response) => {
+  try {
+    const { idToken, question, answer } = req.body || {};
+    if (typeof idToken !== 'string' || typeof question !== 'string' || typeof answer !== 'string') {
+      return res.status(400).json({ success: false, error: 'Recovery question and answer are required.' });
+    }
+    const account = await lookupFirebaseAccount(idToken);
+    await savePatientRecoverySetup(account.email, question, answer);
+    return res.json({ success: true });
+  } catch (error: any) {
+    console.error('Patient recovery setup error:', error?.message || error);
+    const status = /choose a valid|answer must|verification failed/i.test(error?.message || '') ? 400 : 503;
+    return res.status(status).json({ success: false, error: error?.message || 'Could not save recovery details.' });
+  }
+});
+
+apiRouter.post('/patient/recovery/question', async (req: Request, res: Response) => {
+  try {
+    const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ success: false, error: 'Enter a valid registered email address.' });
+    }
+    const question = await getPatientRecoveryQuestion(email);
+    if (!question) {
+      return res.status(404).json({ success: false, error: 'No recovery question is set for this email. Contact support for help.' });
+    }
+    return res.json({ success: true, question });
+  } catch (error: any) {
+    return res.status(503).json({ success: false, error: error?.message || 'Recovery service is unavailable.' });
+  }
+});
+
+apiRouter.post('/patient/recovery/send-otp', async (req: Request, res: Response) => {
+  try {
+    const { email, answer } = req.body || {};
+    if (typeof email !== 'string' || typeof answer !== 'string') {
+      return res.status(400).json({ success: false, error: 'Email and recovery answer are required.' });
+    }
+    await sendPatientRecoveryOtp(email, answer);
+    return res.json({ success: true, message: 'A verification code was sent to your registered email.' });
+  } catch (error: any) {
+    const status = /incorrect|wait a minute|valid registered email/i.test(error?.message || '') ? 400 : /too many recovery attempts/i.test(error?.message || '') ? 429 : 503;
+    return res.status(status).json({ success: false, error: error?.message || 'Could not send a recovery code.' });
+  }
+});
+
+apiRouter.post('/patient/recovery/verify-otp', async (req: Request, res: Response) => {
+  try {
+    const { email, code } = req.body || {};
+    if (typeof email !== 'string' || typeof code !== 'string') {
+      return res.status(400).json({ success: false, error: 'Email and verification code are required.' });
+    }
+    const valid = await verifyPatientRecoveryOtp(email, code);
+    if (!valid) return res.status(400).json({ success: false, error: 'The code is invalid or expired. Request a new code and try again.' });
+    if (!firebaseApiKey) throw new Error('Firebase Authentication is not configured on the server.');
+
+    const response = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode?key=${firebaseApiKey}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        requestType: 'PASSWORD_RESET',
+        email: email.trim().toLowerCase(),
+        ...(process.env.APP_URL ? { continueUrl: new URL('/?passwordReset=complete', process.env.APP_URL).toString() } : {}),
+      }),
+    });
+    if (!response.ok) {
+      const data = await response.json() as { error?: { message?: string } };
+      const firebaseError = data.error?.message || '';
+      console.error('Firebase password reset email request failed', { code: firebaseError.split(':')[0] || 'FIREBASE_ERROR' });
+      if (/EMAIL_NOT_FOUND|INVALID_EMAIL/i.test(firebaseError)) {
+        return res.status(400).json({ success: false, error: 'No patient account was found for this email address.' });
+      }
+      throw new Error('Firebase could not send the password reset link. Check Authentication email settings and try again.');
+    }
+    return res.json({ success: true, message: 'Verification complete. A password reset link has been sent to your email.' });
+  } catch (error: any) {
+    console.error('Patient recovery OTP verification failed', { code: error?.name || 'RECOVERY_ERROR' });
+    return res.status(503).json({ success: false, error: error?.message || 'Could not complete password recovery.' });
+  }
+});
 
 // Memory-only upload configuration (No patient documents stored on disk or publicly exposed)
 const upload = multer({

@@ -65,22 +65,28 @@ service cloud.firestore {
       allow write: if isAdmin();
     }
 
-    // Patient Queue & Tokens: Read allowed for kiosk, TV & patients; updates restricted to authorized clinical staff
+    // Queue records contain identifying and triage details; patients may only read their own records.
     match /patients/{patientId} {
-      allow read: if true;
-      allow create: if true; // patient self-registration
+      allow read: if isStaffMember() || isDoctor()
+        || (isAuthenticated() && resource.data.userId == request.auth.uid);
+      allow create: if isStaffMember() || isDoctor()
+        || (isAuthenticated() && request.resource.data.userId == request.auth.uid);
       allow update, delete: if isStaffMember() || isDoctor() || isAdmin();
     }
 
-    // Patient User Profiles: User can read/write their own profile; clinical staff can read
+    // Patient User Profiles: only the owner and authorized clinical staff may read.
     match /users/{userId} {
-      allow read: if isAuthenticated() || isStaffMember() || isDoctor();
+      allow read: if (isAuthenticated() && request.auth.uid == userId)
+        || isStaffMember() || isDoctor();
       allow write: if isAuthenticated() && request.auth.uid == userId;
     }
 
-    // Prescriptions: Strictly readable by patient or doctor/staff; writable ONLY by verified licensed doctors
+    // Prescriptions: patients can read only documents linked to their own UHID.
     match /prescriptions/{prescriptionId} {
-      allow read: if isAuthenticated() || isDoctor() || isStaffMember();
+      allow read: if isDoctor() || isStaffMember()
+        || (isAuthenticated()
+          && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+          && resource.data.patientUhid == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.uhid);
       allow write: if isDoctor();
     }
 

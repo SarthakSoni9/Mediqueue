@@ -102,6 +102,14 @@ src/
 
 The application seeds initial doctor and patient queue data when the relevant Firestore collections are empty. Review the Firestore rules and authentication settings before deploying to production.
 
+## Patient Password Recovery
+
+Patient sign-up records a recovery question and answer. The answer is stored as a salted hash in MongoDB, not in the patient profile. Password recovery checks that answer, sends a six-digit OTP through SMTP, then sends Firebase's password reset link after the OTP is verified.
+
+Configure `MONGODB_URI`, `EMAIL_USER`, `EMAIL_PASS`, and `APP_URL` in the backend environment. `EMAIL_USER` is the Gmail address used to send recovery codes; `EMAIL_PASS` must be its Google App Password. Never place these values in frontend `VITE_*` variables or commit them. Recovery endpoints are limited to 20 requests per IP every 15 minutes; the OTP expires after 10 minutes, can only be requested once per minute, and allows five guesses. Incorrect recovery answers are limited to five attempts per 15 minutes. Firebase sends its own password-reset link after the code is verified.
+
+For Gmail, enable 2-Step Verification on the sending Google account, then create an App Password in the Google Account security settings and use that generated password as `EMAIL_PASS` (not the account password). Set `APP_URL` to the app's public origin. Add that domain under Firebase Console → Authentication → Settings → Authorized domains, and ensure the Firebase password-reset email template is enabled. Restart the backend after setting the environment variables. Do not share the App Password in chat or source control.
+
 ## Deployment
 
 Build the application with `npm run build`, then deploy the generated `dist/` directory to a static hosting provider such as Firebase Hosting, Vercel, Netlify, or another service that supports Vite applications.

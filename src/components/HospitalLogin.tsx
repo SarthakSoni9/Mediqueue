@@ -104,7 +104,7 @@ export const HospitalLogin: React.FC<HospitalLoginProps> = ({
   };
 
   return (
-    <div className="min-h-screen text-[#173B40] dark:text-[#F1F5F9] flex flex-col font-sans transition-colors duration-200 relative overflow-x-hidden selection:bg-[#2EBB86]/20 selection:text-[#006B67] bg-[radial-gradient(ellipse_at_top,_rgba(46,187,134,0.08),_transparent_52%),#F5FAF7] bg-no-repeat">
+    <div className="min-h-screen text-[#173B40] dark:text-[#F1F5F9] flex flex-col font-heading transition-colors duration-200 relative overflow-x-hidden selection:bg-[#2EBB86]/20 selection:text-[#006B67] bg-[radial-gradient(ellipse_at_top,_rgba(46,187,134,0.08),_transparent_52%),#F5FAF7] bg-no-repeat">
       <img
         src="/mediqueue-logo.png"
         alt="Medi Queue"
@@ -179,7 +179,7 @@ export const HospitalLogin: React.FC<HospitalLoginProps> = ({
 
         {/* Right Column: Staff Authentication Card */}
         <div className="w-full flex justify-center animate-in fade-in zoom-in-95 duration-300">
-          <div className="w-full sm:w-[min(92vw,480px)] lg:w-[440px] xl:w-[470px] bg-white/70 dark:bg-[#162927]/72 backdrop-blur-xl rounded-[24px] border border-white/85 dark:border-[#284440]/80 shadow-[0_24px_70px_rgba(0,107,103,0.14)] overflow-hidden transition-all duration-300">
+          <div className="w-full sm:w-[min(84vw,700px)] min-h-[500px] bg-white/70 dark:bg-[#162927]/72 backdrop-blur-xl rounded-[24px] border border-white/85 dark:border-[#284440]/80 shadow-[0_24px_70px_rgba(0,107,103,0.14)] overflow-hidden transition-all duration-300">
             {/* Top Hospital Badge Header */}
             <div className="bg-white/42 dark:bg-[#1B302D]/50 backdrop-blur-lg p-6 text-[#173B40] dark:text-white text-center relative border-b border-[#DCEBE3]/90 dark:border-[#284440]">
               <div className="w-14 h-14 rounded-2xl bg-[#E8F8EF]/90 dark:bg-[#087F78]/25 border border-[#BFE8D1] dark:border-[#31534B] text-[#006B67] dark:text-[#66D4A5] flex items-center justify-center text-2xl mx-auto mb-3 shadow-sm">
@@ -189,12 +189,9 @@ export const HospitalLogin: React.FC<HospitalLoginProps> = ({
                 <i className="fa-solid fa-lock text-[9px]"></i>
                 <span>Authorized Personnel Only</span>
               </div>
-              <h2 className="text-xl font-black text-[#173B40] dark:text-white tracking-tight font-heading">
+              <h2 className="text-xl font-extrabold text-[#173B40] dark:text-white tracking-tight">
                 Hospital Staff & Admin Portal
               </h2>
-              <p className="text-xs text-[#647875] dark:text-[#A8BDB6] mt-1 max-w-xs mx-auto">
-                Secure clinical authentication for doctors, triage officers, and hospital administration.
-              </p>
             </div>
 
             {/* Login Form Body */}
@@ -309,11 +306,6 @@ export const HospitalLogin: React.FC<HospitalLoginProps> = ({
                 </button>
               </div>
 
-              {/* Security Footnote */}
-              <div className="pt-1 text-center text-[11px] text-slate-500 dark:text-slate-400 flex items-center justify-center gap-1.5">
-                <Lock className="w-3 h-3 text-emerald-500" />
-                <span>ICMR & NABH Hospital Data Compliance • 256-bit SSL Session</span>
-              </div>
             </div>
           </div>
         </div>

@@ -216,6 +216,12 @@ export async function saveUserProfileToFirestore(user: PatientUser): Promise<voi
   }
 }
 
+// Strict variant for registration flows that must not report success if Firestore rejects the write.
+export async function saveUserProfileToFirestoreOrThrow(user: PatientUser): Promise<void> {
+  const docRef = doc(db, 'users', user.id);
+  await setDoc(docRef, sanitizeFirestoreData(user), { merge: true });
+}
+
 // Save Reschedule Audit record in Firestore
 export async function saveRescheduleAuditToFirestore(audit: any): Promise<void> {
   try {

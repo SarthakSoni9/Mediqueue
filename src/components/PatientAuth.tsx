@@ -8,11 +8,12 @@ import {
 } from '../types';
 import { generateAlphanumericUHID } from '../data/mockData';
 import { playHospitalChime } from '../utils/audio';
-import { auth, db, firebaseProjectId, signInWithGoogle, saveUserProfileToFirestore } from '../firebase';
+import { auth, db, firebaseProjectId, signInWithGoogle, saveUserProfileToFirestoreOrThrow } from '../firebase';
 import confetti from 'canvas-confetti';
 import { SmartDocumentUpload } from './SmartDocumentUpload';
 import { ExtractedFieldIndicator } from './ExtractedFieldIndicator';
 import { validatePhoneNumber } from '../utils/phoneValidation';
+import { RECOVERY_QUESTIONS, type RecoveryQuestion } from '../utils/recoveryQuestions';
 import {
   ShieldCheck,
   Send,
@@ -26,12 +27,16 @@ import {
 } from 'lucide-react';
 
 interface PatientAuthProps {
+  initialMode?: 'choice' | 'signin';
   onLoginSuccess: (user: PatientUser) => void;
   onRegistrationSuccess?: (user: PatientUser) => void;
   onEmergencyBypass?: () => void;
   onShowToast?: (title: string, desc: string, type?: 'info' | 'success' | 'urgent') => void;
   onOpenHospitalStaffLogin?: () => void;
 }
+
+const SIGNUP_PASSWORD_MIN_LENGTH = 6;
+const SIGNUP_PASSWORD_MAX_LENGTH = 18;
 
 interface DictatedSignupDetails {
   name?: string;
@@ -171,16 +176,25 @@ const parseSignupVoiceDetails = (transcript: string): DictatedSignupDetails => {
 };
 
 export const PatientAuth: React.FC<PatientAuthProps> = ({
+  initialMode = 'choice',
   onLoginSuccess,
   onRegistrationSuccess,
   onEmergencyBypass,
   onShowToast,
   onOpenHospitalStaffLogin,
 }) => {
-  const [authMode, setAuthMode] = useState<'choice' | 'signin' | 'signup_options' | 'signup' | 'voice_signup' | 'otp_verify'>('choice');
+  const [authMode, setAuthMode] = useState<'choice' | 'signin' | 'signup_options' | 'signup' | 'voice_signup' | 'otp_verify'>(initialMode);
   const [entryAnimationReady, setEntryAnimationReady] = useState(false);
   const [loginUsername, setLoginUsername] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
+  const [showPasswordRecovery, setShowPasswordRecovery] = useState(false);
+  const [recoveryEmail, setRecoveryEmail] = useState('');
+  const [recoveryQuestion, setRecoveryQuestion] = useState('');
+  const [recoveryAnswer, setRecoveryAnswer] = useState('');
+  const [recoveryCode, setRecoveryCode] = useState('');
+  const [recoveryStep, setRecoveryStep] = useState<'question' | 'answer' | 'otp' | 'complete'>('question');
+  const [recoveryError, setRecoveryError] = useState('');
+  const [isRecoveryLoading, setIsRecoveryLoading] = useState(false);
   const [loginPhone, setLoginPhone] = useState<string>('');
   const [phoneConfirmation, setPhoneConfirmation] = useState<ConfirmationResult | null>(null);
   const [enteredOtp, setEnteredOtp] = useState<string>('');
@@ -201,6 +215,8 @@ export const PatientAuth: React.FC<PatientAuthProps> = ({
   const [signupSymptomDuration, setSignupSymptomDuration] = useState<string>('');
   const [signupEmail, setSignupEmail] = useState<string>('');
   const [signupPassword, setSignupPassword] = useState<string>('');
+  const [signupRecoveryQuestion, setSignupRecoveryQuestion] = useState<RecoveryQuestion | ''>('');
+  const [signupRecoveryAnswer, setSignupRecoveryAnswer] = useState('');
   const signupPasswordInputRef = useRef<HTMLInputElement>(null);
   const signupStepperRef = useRef<HTMLDivElement>(null);
   const [signupStep, setSignupStep] = useState<1 | 2 | 3>(1);
@@ -637,6 +653,67 @@ export const PatientAuth: React.FC<PatientAuthProps> = ({
     }
   };
 
+  const handleLoadRecoveryQuestion = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setRecoveryError('');
+    setIsRecoveryLoading(true);
+    try {
+      const response = await fetch('/api/patient/recovery/question', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: recoveryEmail.trim().toLowerCase() }),
+      });
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.error || 'Could not load your recovery question.');
+      setRecoveryQuestion(result.question);
+      setRecoveryStep('answer');
+    } catch (error: any) {
+      setRecoveryError(error?.message || 'Could not load your recovery question.');
+    } finally {
+      setIsRecoveryLoading(false);
+    }
+  };
+
+  const handleSendRecoveryOtp = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setRecoveryError('');
+    setIsRecoveryLoading(true);
+    try {
+      const response = await fetch('/api/patient/recovery/send-otp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: recoveryEmail.trim().toLowerCase(), answer: recoveryAnswer }),
+      });
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.error || 'Could not send a recovery code.');
+      setRecoveryStep('otp');
+    } catch (error: any) {
+      setRecoveryError(error?.message || 'Could not send a recovery code.');
+    } finally {
+      setIsRecoveryLoading(false);
+    }
+  };
+
+  const handleVerifyRecoveryOtp = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setRecoveryError('');
+    setIsRecoveryLoading(true);
+    try {
+      const response = await fetch('/api/patient/recovery/verify-otp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: recoveryEmail.trim().toLowerCase(), code: recoveryCode.trim() }),
+      });
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.error || 'The code could not be verified.');
+      setRecoveryStep('complete');
+    } catch (error: any) {
+      setRecoveryError(error?.message || 'The code could not be verified.');
+    } finally {
+      setIsRecoveryLoading(false);
+    }
+  };
+
   const handleSendOtp = async (event: React.FormEvent) => {
     event.preventDefault();
     const phone = validatePhoneNumber(loginPhone, true);
@@ -724,8 +801,8 @@ export const PatientAuth: React.FC<PatientAuthProps> = ({
     e.preventDefault();
     setErrorMessage('');
 
-    if (signupPassword.length < 6) {
-      const message = 'Password must be at least 6 characters before you can continue.';
+    if (signupPassword.length < SIGNUP_PASSWORD_MIN_LENGTH || signupPassword.length > SIGNUP_PASSWORD_MAX_LENGTH) {
+      const message = `Password must be between ${SIGNUP_PASSWORD_MIN_LENGTH} and ${SIGNUP_PASSWORD_MAX_LENGTH} characters.`;
       setFieldErrors((current) => ({ ...current, password: message }));
       setErrorMessage(message);
       notify('Password Too Short', message, 'urgent');
@@ -737,12 +814,20 @@ export const PatientAuth: React.FC<PatientAuthProps> = ({
     const phoneRes = validatePhoneNumber(signupPhone, true);
     const emailErr = signupEmail.trim() ? validateEmail(signupEmail) : 'Email address is required for username and password sign-in.';
     const emergPhoneRes = signupEmergencyPhone.trim() ? validatePhoneNumber(signupEmergencyPhone, false) : { isValid: true, error: '' };
+    const recoveryError = !signupRecoveryQuestion
+      ? 'Choose a recovery question.'
+      : signupRecoveryAnswer.trim().length < 2
+      ? 'Enter a recovery answer with at least 2 characters.'
+      : '';
 
     const errors: Record<string, string> = {};
     if (nameErr) errors.name = nameErr;
     if (!phoneRes.isValid) errors.phone = phoneRes.error;
     if (emailErr) errors.email = emailErr;
-    if (signupPassword.length < 6) errors.password = 'Password must be at least 6 characters.';
+    if (signupPassword.length < SIGNUP_PASSWORD_MIN_LENGTH || signupPassword.length > SIGNUP_PASSWORD_MAX_LENGTH) {
+      errors.password = `Password must be between ${SIGNUP_PASSWORD_MIN_LENGTH} and ${SIGNUP_PASSWORD_MAX_LENGTH} characters.`;
+    }
+    if (recoveryError) errors.recovery = recoveryError;
     if (!emergPhoneRes.isValid) errors.emergencyPhone = emergPhoneRes.error;
 
     if (Object.keys(errors).length > 0) {
@@ -761,10 +846,27 @@ export const PatientAuth: React.FC<PatientAuthProps> = ({
 
     setIsSubmitting(true);
     try {
-      const credential = await createUserWithEmailAndPassword(auth, signupEmail.trim().toLowerCase(), signupPassword);
+      const accountEmail = signupEmail.trim().toLowerCase();
+      const currentFirebaseUser = auth.currentUser;
+      const firebaseUser = currentFirebaseUser?.email?.toLowerCase() === accountEmail
+        ? currentFirebaseUser
+        : (await createUserWithEmailAndPassword(auth, accountEmail, signupPassword)).user;
+      const recoveryResponse = await fetch('/api/patient/recovery/setup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          idToken: await firebaseUser.getIdToken(),
+          question: signupRecoveryQuestion,
+          answer: signupRecoveryAnswer,
+        }),
+      });
+      const recoveryResult = await recoveryResponse.json();
+      if (!recoveryResponse.ok || !recoveryResult.success) {
+        throw new Error(recoveryResult.error || 'Could not save password recovery details.');
+      }
       const generatedUhid = generateAlphanumericUHID('DEL');
       const newPatientUser: PatientUser = {
-        id: credential.user.uid,
+        id: firebaseUser.uid,
         uhid: generatedUhid,
         name: signupName.trim(),
         phone: signupPhone.trim().startsWith('+') ? signupPhone.trim() : `+91 ${signupPhone.trim()}`,
@@ -784,7 +886,7 @@ export const PatientAuth: React.FC<PatientAuthProps> = ({
         symptomDuration: signupSymptomDuration.trim() || undefined,
       };
 
-      await saveUserProfileToFirestore(newPatientUser);
+      await saveUserProfileToFirestoreOrThrow(newPatientUser);
       playHospitalChime();
       try { confetti({ particleCount: 65, spread: 85, origin: { y: 0.5 } }); } catch {}
       notify('Account Created & UHID Assigned', `UHID ${generatedUhid} generated for ${newPatientUser.name}.`, 'success');
@@ -796,7 +898,9 @@ export const PatientAuth: React.FC<PatientAuthProps> = ({
         ? 'Choose a password with at least 6 characters.'
         : error?.code === 'auth/operation-not-allowed'
         ? 'Email and password accounts are not enabled in Firebase Authentication.'
-        : error?.message || 'Could not create your account. Please try again.';
+        : error?.code === 'permission-denied' || error?.code === 'unavailable'
+        ? 'Your Firebase account was created, but the patient profile could not be saved in Firestore. Check Firestore access and retry; the signed-in account will be reused.'
+        : error?.message || 'Could not complete account setup. Retry to continue with the account already signed in.';
       setErrorMessage(message);
     } finally {
       setIsSubmitting(false);
@@ -964,6 +1068,23 @@ export const PatientAuth: React.FC<PatientAuthProps> = ({
                     <label className="block space-y-1.5 text-xs font-bold text-[#10244A] dark:text-white">Password
                       <input type="password" value={loginPassword} onChange={(event) => setLoginPassword(event.target.value)} autoComplete="current-password" className="mt-1.5 h-12 w-full rounded-xl border border-slate-200 bg-white px-3.5 text-sm font-medium outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100" placeholder="Enter your password" required />
                     </label>
+                    <div className="-mt-2 text-right">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setRecoveryEmail(loginUsername.includes('@') ? loginUsername.trim() : '');
+                          setRecoveryQuestion('');
+                          setRecoveryAnswer('');
+                          setRecoveryCode('');
+                          setRecoveryError('');
+                          setRecoveryStep('question');
+                          setShowPasswordRecovery(true);
+                        }}
+                        className="text-xs font-bold text-[#087F78] hover:underline"
+                      >
+                        Forgot password?
+                      </button>
+                    </div>
                     <button type="submit" disabled={isSubmitting} className="w-full h-12 rounded-xl bg-[#0B9FE3] text-white font-extrabold text-sm shadow-md transition hover:bg-[#087FC9] disabled:opacity-60">{isSubmitting ? 'Signing in…' : 'Sign In'}</button>
                     {onOpenHospitalStaffLogin && <button type="button" onClick={onOpenHospitalStaffLogin} className="w-full min-h-11 rounded-xl border border-[#BAE6FD] bg-[#F0F9FF] text-[#087FC9] font-bold text-xs">Staff Portal Login</button>}
                   </form>
@@ -1148,22 +1269,27 @@ export const PatientAuth: React.FC<PatientAuthProps> = ({
                           ref={signupPasswordInputRef}
                           type="password"
                           autoComplete="new-password"
-                          minLength={6}
+                          minLength={SIGNUP_PASSWORD_MIN_LENGTH}
+                          maxLength={SIGNUP_PASSWORD_MAX_LENGTH}
                           required
                           value={signupPassword}
                           onChange={(event) => {
-                            const password = event.target.value;
+                            const password = event.target.value.slice(0, SIGNUP_PASSWORD_MAX_LENGTH);
                             setSignupPassword(password);
                             setFieldErrors((current) => current.password
-                              ? { ...current, password: password.length < 6 ? 'Password must be at least 6 characters.' : '' }
+                              ? { ...current, password: password.length < SIGNUP_PASSWORD_MIN_LENGTH
+                                ? `Password must be at least ${SIGNUP_PASSWORD_MIN_LENGTH} characters.`
+                                : password.length > SIGNUP_PASSWORD_MAX_LENGTH
+                                ? `Password cannot exceed ${SIGNUP_PASSWORD_MAX_LENGTH} characters.`
+                                : '' }
                               : current);
                           }}
-                          placeholder="At least 6 characters"
+                          placeholder="6 to 18 characters"
                           className={`w-full h-11 px-3 rounded-xl border ${fieldErrors.password ? 'border-rose-400' : 'border-[#DCE7F0]'} bg-white dark:bg-[#1A263C] text-xs text-[#10244A] dark:text-white focus:outline-hidden focus:ring-2 focus:ring-[#0B9FE3]/20 transition`}
                         />
                         {fieldErrors.password && <p className="text-[11px] text-rose-600">{fieldErrors.password}</p>}
-                        <p className={`text-[11px] ${signupPassword.length > 0 && signupPassword.length < 6 ? 'text-rose-600' : 'text-slate-500 dark:text-slate-400'}`}>
-                          {signupPassword.length}/6 characters minimum
+                        <p className={`text-[11px] ${signupPassword.length > 0 && signupPassword.length < SIGNUP_PASSWORD_MIN_LENGTH ? 'text-rose-600' : 'text-slate-500 dark:text-slate-400'}`}>
+                          {signupPassword.length}/{SIGNUP_PASSWORD_MAX_LENGTH} characters (minimum {SIGNUP_PASSWORD_MIN_LENGTH})
                         </p>
                       </div>
 
@@ -1214,6 +1340,38 @@ export const PatientAuth: React.FC<PatientAuthProps> = ({
                         </select>
                       </div>
                     </div>
+                    <section className="grid grid-cols-1 gap-3 rounded-2xl border border-[#BAE6FD] bg-[#F0F9FF]/70 p-4 sm:grid-cols-2 dark:border-[#1E3A68] dark:bg-[#112240]/60">
+                      <div className="sm:col-span-2">
+                        <h3 className="text-sm font-bold text-[#10244A] dark:text-white">Password recovery</h3>
+                        <p className="mt-1 text-[11px] text-slate-600 dark:text-slate-300">Choose a question and answer. You will need it, plus an email code, to reset your password.</p>
+                      </div>
+                      <label className="space-y-1 text-xs font-bold text-[#10244A] dark:text-white">
+                        Recovery question <span className="text-rose-500">*</span>
+                        <select
+                          required
+                          value={signupRecoveryQuestion}
+                          onChange={(event) => setSignupRecoveryQuestion(event.target.value as RecoveryQuestion | '')}
+                          className="h-11 w-full rounded-xl border border-[#DCE7F0] bg-white px-3 text-xs font-medium dark:border-slate-700 dark:bg-[#1A263C]"
+                        >
+                          <option value="">Select a question</option>
+                          {RECOVERY_QUESTIONS.map((question) => <option key={question} value={question}>{question}</option>)}
+                        </select>
+                      </label>
+                      <label className="space-y-1 text-xs font-bold text-[#10244A] dark:text-white">
+                        Your answer <span className="text-rose-500">*</span>
+                        <input
+                          type="text"
+                          required
+                          maxLength={100}
+                          value={signupRecoveryAnswer}
+                          onChange={(event) => setSignupRecoveryAnswer(event.target.value)}
+                          placeholder="Enter an answer you will remember"
+                          autoComplete="off"
+                          className="h-11 w-full rounded-xl border border-[#DCE7F0] bg-white px-3 text-xs font-medium dark:border-slate-700 dark:bg-[#1A263C]"
+                        />
+                      </label>
+                      {fieldErrors.recovery && <p className="sm:col-span-2 text-[11px] font-semibold text-rose-600">{fieldErrors.recovery}</p>}
+                    </section>
                     </>}
 
                     {signupStep === 2 && <>
@@ -1418,7 +1576,7 @@ export const PatientAuth: React.FC<PatientAuthProps> = ({
                     {/* Create Patient Account Primary Button (Section 26) */}
                     <button
                       type="submit"
-                      disabled={isSubmitting || signupPassword.length < 6}
+                      disabled={isSubmitting || signupPassword.length < SIGNUP_PASSWORD_MIN_LENGTH || signupPassword.length > SIGNUP_PASSWORD_MAX_LENGTH}
                       className="w-full h-13 sm:h-14 rounded-xl bg-[#0B9FE3] hover:bg-[#087FC9] text-white font-extrabold text-xs sm:text-sm shadow-md shadow-[#0B9FE3]/25 flex items-center justify-center gap-2.5 transition-all hover:scale-[1.01] active:scale-[0.99] cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:scale-100"
                     >
                       <UserCheck className="w-4 h-4" />
@@ -1436,11 +1594,21 @@ export const PatientAuth: React.FC<PatientAuthProps> = ({
                               const nameError = validateName(signupName);
                               const phoneResult = validatePhoneNumber(signupPhone, true);
                               const emailError = signupEmail.trim() ? validateEmail(signupEmail) : 'Email address is required.';
-                              const passwordError = signupPassword.length < 6 ? 'Password must be at least 6 characters.' : '';
+                              const recoveryError = !signupRecoveryQuestion
+                                ? 'Choose a recovery question.'
+                                : signupRecoveryAnswer.trim().length < 2
+                                ? 'Enter a recovery answer with at least 2 characters.'
+                                : '';
+                              const passwordError = signupPassword.length < SIGNUP_PASSWORD_MIN_LENGTH
+                                ? `Password must be at least ${SIGNUP_PASSWORD_MIN_LENGTH} characters.`
+                                : signupPassword.length > SIGNUP_PASSWORD_MAX_LENGTH
+                                ? `Password cannot exceed ${SIGNUP_PASSWORD_MAX_LENGTH} characters.`
+                                : '';
                               const errors: Record<string, string> = {};
                               if (nameError) errors.name = nameError;
                               if (!phoneResult.isValid) errors.phone = phoneResult.error;
                               if (emailError) errors.email = emailError;
+                              if (recoveryError) errors.recovery = recoveryError;
                               if (passwordError) errors.password = passwordError;
                               if (!Number.isFinite(signupAge) || signupAge < 1 || signupAge > 120) errors.age = 'Enter an age from 1 to 120.';
                               setFieldErrors(errors);
@@ -1487,6 +1655,59 @@ export const PatientAuth: React.FC<PatientAuthProps> = ({
         </div>
 
       </main>
+
+      {showPasswordRecovery && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-sm">
+          <section role="dialog" aria-modal="true" aria-labelledby="patient-recovery-title" className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-700 dark:bg-[#111827]">
+            <div className="mb-5 flex items-start justify-between gap-4">
+              <div>
+                <h2 id="patient-recovery-title" className="text-lg font-extrabold text-[#10244A] dark:text-white">Reset your password</h2>
+                <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">Verify your recovery answer and email to receive a reset link.</p>
+              </div>
+              <button type="button" onClick={() => setShowPasswordRecovery(false)} aria-label="Close password recovery" className="rounded-lg px-2 py-1 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800">✕</button>
+            </div>
+
+            {recoveryStep === 'question' && (
+              <form onSubmit={handleLoadRecoveryQuestion} className="space-y-4">
+                <label className="block space-y-1.5 text-xs font-bold text-slate-700 dark:text-slate-200">Registered email address
+                  <input type="email" required autoComplete="email" value={recoveryEmail} onChange={(event) => setRecoveryEmail(event.target.value)} placeholder="name@mail.com" className="h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm font-medium outline-none focus:border-teal-500 dark:border-slate-700 dark:bg-slate-900" />
+                </label>
+                <button type="submit" disabled={isRecoveryLoading} className="h-11 w-full rounded-xl bg-[#087F78] text-sm font-bold text-white disabled:opacity-60">{isRecoveryLoading ? 'Checking…' : 'Continue'}</button>
+              </form>
+            )}
+
+            {recoveryStep === 'answer' && (
+              <form onSubmit={handleSendRecoveryOtp} className="space-y-4">
+                <p className="rounded-xl bg-slate-50 p-3 text-sm font-semibold text-slate-800 dark:bg-slate-900 dark:text-slate-100">{recoveryQuestion}</p>
+                <label className="block space-y-1.5 text-xs font-bold text-slate-700 dark:text-slate-200">Your recovery answer
+                  <input type="text" required maxLength={100} autoComplete="off" value={recoveryAnswer} onChange={(event) => setRecoveryAnswer(event.target.value)} className="h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm font-medium outline-none focus:border-teal-500 dark:border-slate-700 dark:bg-slate-900" />
+                </label>
+                <div className="flex gap-3">
+                  <button type="button" onClick={() => { setRecoveryStep('question'); setRecoveryError(''); }} className="h-11 rounded-xl border border-slate-200 px-4 text-sm font-bold text-slate-700 dark:border-slate-700 dark:text-slate-200">Back</button>
+                  <button type="submit" disabled={isRecoveryLoading} className="h-11 flex-1 rounded-xl bg-[#087F78] text-sm font-bold text-white disabled:opacity-60">{isRecoveryLoading ? 'Sending code…' : 'Send email code'}</button>
+                </div>
+              </form>
+            )}
+
+            {recoveryStep === 'otp' && (
+              <form onSubmit={handleVerifyRecoveryOtp} className="space-y-4">
+                <p className="text-sm text-slate-600 dark:text-slate-300">Enter the 6-digit code sent to <strong>{recoveryEmail}</strong>.</p>
+                <input type="text" inputMode="numeric" autoComplete="one-time-code" maxLength={6} pattern="[0-9]{6}" required value={recoveryCode} onChange={(event) => setRecoveryCode(event.target.value.replace(/\D/g, '').slice(0, 6))} placeholder="000000" className="h-12 w-full rounded-xl border border-slate-200 bg-white px-3 text-center font-mono text-xl tracking-[0.4em] outline-none focus:border-teal-500 dark:border-slate-700 dark:bg-slate-900" />
+                <button type="submit" disabled={isRecoveryLoading || recoveryCode.length !== 6} className="h-11 w-full rounded-xl bg-[#087F78] text-sm font-bold text-white disabled:opacity-60">{isRecoveryLoading ? 'Verifying…' : 'Verify code'}</button>
+              </form>
+            )}
+
+            {recoveryStep === 'complete' && (
+              <div className="space-y-4">
+                <p className="text-sm leading-relaxed text-slate-600 dark:text-slate-300">Your email code was verified and Firebase sent a password reset link to <strong>{recoveryEmail}</strong>. Open it to choose a new password. After resetting, you will return here to sign in with your new password.</p>
+                <button type="button" onClick={() => setShowPasswordRecovery(false)} className="h-11 w-full rounded-xl bg-[#087F78] text-sm font-bold text-white">Back to sign in</button>
+              </div>
+            )}
+
+            {recoveryError && <p role="alert" className="mt-4 rounded-xl bg-rose-50 p-3 text-xs font-semibold text-rose-700 dark:bg-rose-950/40 dark:text-rose-300">{recoveryError}</p>}
+          </section>
+        </div>
+      )}
 
     </div>
   );

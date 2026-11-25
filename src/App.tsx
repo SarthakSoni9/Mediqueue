@@ -32,7 +32,7 @@ import {
   signOutPatient,
 } from './firebase';
 import { onAuthStateChanged } from 'firebase/auth';
-import { collection, onSnapshot, doc, getDoc, setDoc } from 'firebase/firestore';
+import { collection, onSnapshot, doc, getDoc, query, where } from 'firebase/firestore';
 
 export default function App() {
   // 1. Role-Based Access Control & User State Management
@@ -61,9 +61,11 @@ export default function App() {
       return null;
     }
   });
-  const [showHospitalDiscovery, setShowHospitalDiscovery] = useState(() =>
-    Boolean(localStorage.getItem('mediqueue_patient_user')) && localStorage.getItem('mediqueue_discovery_open') === 'true'
-  );
+  const [showHospitalDiscovery, setShowHospitalDiscovery] = useState(() => {
+    const initialHash = window.location.hash.replace('#', '').toLowerCase();
+    return initialHash === 'hospital-discovery'
+      || (Boolean(localStorage.getItem('mediqueue_patient_user')) && localStorage.getItem('mediqueue_discovery_open') === 'true');
+  });
 
   // 2. Navigation State for Patient & Staff
   const [patientNavView, setPatientNavView] = useState<PatientNavView>(() => {
@@ -100,6 +102,9 @@ export default function App() {
     return hash === 'admin-login' || hash === 'hospital-login' || hash === 'staff-login';
   });
   const [isHospitalLoginOpen, setIsHospitalLoginOpen] = useState<boolean>(false);
+  const [patientAuthInitialMode, setPatientAuthInitialMode] = useState<'choice' | 'signin'>(() =>
+    new URLSearchParams(window.location.search).get('passwordReset') === 'complete' ? 'signin' : 'choice'
+  );
 
   // Sidebar & Modal UI Controls
   const [activeSidebarTab, setActiveSidebarTab] = useState<SidebarTab>(() => {
@@ -164,7 +169,7 @@ export default function App() {
   // 3. Sync State with Browser URL & Protected Route Enforcement
   const updateUrlHash = useCallback((hash: string) => {
     if (window.location.hash !== `#${hash}`) {
-      window.history.replaceState(null, '', `#${hash}`);
+      window.history.pushState({ route: hash }, '', `#${hash}`);
     }
   }, []);
 
@@ -229,10 +234,28 @@ export default function App() {
     updateUrlHash(hashMap[section] || 'staff-dashboard');
   };
 
-  // Handle URL Hash Changes (Enforce route-level protection)
+  // Handle browser Back/Forward navigation (Enforce route-level protection)
   useEffect(() => {
-    const handleHashChange = () => {
+    const handleHistoryNavigation = () => {
       const hash = window.location.hash.replace('#', '').toLowerCase();
+
+      if (hash !== 'hospital-discovery') {
+        setShowHospitalDiscovery(false);
+        localStorage.setItem('mediqueue_discovery_open', 'false');
+      }
+
+      if (hash === 'hospital-discovery') {
+        if (currentUser && userRole === 'patient') {
+          setIsHospitalLoginOpen(false);
+          setShowHospitalDiscovery(true);
+          localStorage.setItem('mediqueue_discovery_open', 'true');
+        } else {
+          setShowHospitalDiscovery(false);
+          setPatientNavView('patient_pass');
+          window.history.replaceState(null, '', '#patient-pass');
+        }
+        return;
+      }
 
       if (hash === 'doctor-login' || hash === 'doctor-auth') {
         setIsDoctorLoginOpen(true);
@@ -371,9 +394,9 @@ export default function App() {
       }
     };
 
-    window.addEventListener('hashchange', handleHashChange);
-    return () => window.removeEventListener('hashchange', handleHashChange);
-  }, [showToast]);
+    window.addEventListener('popstate', handleHistoryNavigation);
+    return () => window.removeEventListener('popstate', handleHistoryNavigation);
+  }, [currentUser?.id, showToast, userRole]);
 
   // 4. Initialize Firebase and Listen to Auth Changes
   useEffect(() => {
@@ -389,33 +412,12 @@ export default function App() {
             setShowHospitalDiscovery(localStorage.getItem('mediqueue_discovery_open') === 'true');
             setCurrentUser(data);
             localStorage.setItem('mediqueue_patient_user', JSON.stringify(data));
-          } else {
-            // Phone OTP may authenticate a number that has no patient profile yet.
-            // Let the phone sign-in flow verify the registered profile before creating anything.
-            if (fbUser.providerData.some((provider) => provider.providerId === 'phone')) return;
-
-            const newUser: PatientUser = {
-              id: fbUser.uid,
-              uhid: `SJMC-${new Date().getFullYear()}-DEL-${Math.floor(10000 + Math.random() * 90000)}P`,
-              name: fbUser.displayName || 'Registered Patient',
-              email: fbUser.email || '',
-              phone: fbUser.phoneNumber || '+91 98101 23456',
-              age: 32,
-              gender: 'Male',
-              bloodGroup: 'B+',
-              emergencyContactName: 'Family Contact',
-              emergencyContactPhone: '+91 98111 99999',
-              allergies: ['Penicillin'],
-              chronicConditions: ['Hypertension'],
-              registeredAt: new Date().toISOString(),
-              avatarUrl: fbUser.photoURL || undefined,
-              hasHealthPass: true,
-            };
-            await setDoc(userDocRef, newUser);
-            setShowHospitalDiscovery(localStorage.getItem('mediqueue_discovery_open') === 'true');
-            setCurrentUser(newUser);
-            localStorage.setItem('mediqueue_patient_user', JSON.stringify(newUser));
+          } else if (fbUser.providerData.some((provider) => provider.providerId === 'phone')) {
+            // Phone OTP must match an existing patient profile before the flow can finish sign-in.
+            return;
           }
+          // Signup and Google sign-in flows save their complete profile explicitly.
+          // Do not create placeholder patient records from an auth-state event.
         } catch (e) {
           console.warn('Auth snapshot error:', e);
         }
@@ -429,23 +431,30 @@ export default function App() {
   // 5. Real-time Firestore Listeners for Patients & Doctors
   useEffect(() => {
     try {
-      const unsubPatients = onSnapshot(
-        collection(db, 'patients'),
-        (snapshot) => {
-          if (!snapshot.empty) {
-            setIsDbConnected(true);
-            const livePatients: Patient[] = [];
-            snapshot.forEach((docSnap) => {
-              livePatients.push(docSnap.data() as Patient);
-            });
-            livePatients.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-            setPatients(livePatients);
-          }
-        },
-        (err) => {
-          console.warn('Firestore patients sync fallback to local memory:', err);
-        }
-      );
+      const patientsCollection = collection(db, 'patients');
+      const patientQuery = userRole !== 'patient' && auth.currentUser
+        ? patientsCollection
+        : currentUser
+        ? query(patientsCollection, where('userId', '==', currentUser.id))
+        : null;
+      if (!patientQuery) setPatients(INITIAL_PATIENTS);
+      const unsubPatients = patientQuery
+        ? onSnapshot(
+            patientQuery,
+            (snapshot) => {
+              setIsDbConnected(true);
+              const livePatients: Patient[] = [];
+              snapshot.forEach((docSnap) => {
+                livePatients.push(docSnap.data() as Patient);
+              });
+              livePatients.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+              setPatients(livePatients);
+            },
+            (err) => {
+              console.warn('Firestore patients sync fallback to local memory:', err);
+            }
+          )
+        : () => {};
 
       const unsubDoctors = onSnapshot(
         collection(db, 'doctors'),
@@ -476,7 +485,7 @@ export default function App() {
     } catch (e) {
       console.warn('Firestore subscription error:', e);
     }
-  }, []);
+  }, [currentUser?.id, userRole]);
 
   // Find active patient object strictly belonging to currentUser or the active session
   const activePatientRecord = currentUser
@@ -1023,6 +1032,7 @@ export default function App() {
           onLoginSuccess={handleStaffLoginSuccess}
           onCancel={() => {
             setIsHospitalLoginOpen(false);
+            setPatientAuthInitialMode('signin');
             updateUrlHash(currentUser ? 'dashboard' : 'patient-pass');
           }}
           onShowToast={showToast}
@@ -1089,10 +1099,12 @@ export default function App() {
     return (
       <div className="min-h-screen bg-[#F6FAFE] dark:bg-[#0B1220] text-[#14213D] dark:text-[#F1F5F9] flex flex-col transition-colors duration-200">
         <PatientAuth
+          initialMode={patientAuthInitialMode}
           onLoginSuccess={handleUserLogin}
           onRegistrationSuccess={(user) => handleUserLogin(user, 'dashboard', true)}
           onShowToast={showToast}
           onOpenHospitalStaffLogin={() => {
+            setPatientAuthInitialMode('signin');
             setIsHospitalLoginOpen(true);
             updateUrlHash('hospital-login');
           }}
